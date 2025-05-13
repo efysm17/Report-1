@@ -1,0 +1,113 @@
+import cv2
+import numpy as np
+import picamera
+import picamera.array
+import time
+
+# Load multiple templates per category (if available)
+templates = {
+    "Up Arrow": [np.load("up_arrow_contour.npy", allow_pickle=True)],
+    "Down Arrow": [np.load("down_arrow_contour.npy", allow_pickle=True)],
+    "Left Arrow": [np.load("arrow_left_contour.npy", allow_pickle=True)],
+    "Right Arrow": [np.load("arrow_right_contour.npy", allow_pickle=True)],
+    "Distance Sign": [np.load("distance_contour.npy", allow_pickle=True)],
+    "Stop Sign": [np.load("stop_contour.npy", allow_pickle=True)],
+    "Face": [np.load("face_contour.npy", allow_pickle=True)],
+    "Traffic Light": [np.load("traffic_lights_contour.npy", allow_pickle=True)]
+}
+
+def match_template(contour):
+    best_shape = "Unknown"
+    best_score = float('inf')
+
+    for shape_name, template_list in templates.items():
+        for template in template_list:
+            score = cv2.matchShapes(contour, template, 1, 0.0)
+            if score < best_score:
+                best_score = score
+                best_shape = shape_name
+
+    if best_score < 0.1:
+        return best_shape, best_score
+    else:
+        return "Unknown", best_score
+
+def detect_shapes(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edged = cv2.Canny(blurred, 50, 150)
+
+    contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    for cnt in contours:
+        epsilon = 0.04 * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        x, y, w, h = cv2.boundingRect(approx)
+
+        if cv2.contourArea(cnt) < 100:
+            continue
+
+        # Get region of interest (ROI)
+        roi = frame[y:y+h, x:x+w]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        # Color ranges
+        yellow_lower = np.array([20, 80, 80])
+        yellow_upper = np.array([35, 255, 255])
+        yellow_mask = cv2.inRange(hsv, yellow_lower, yellow_upper)
+
+        red_lower1 = np.array([0, 70, 70])
+        red_upper1 = np.array([10, 255, 255])
+        red_lower2 = np.array([160, 70, 70])
+        red_upper2 = np.array([180, 255, 255])
+        red_mask = cv2.inRange(hsv, red_lower1, red_upper1) + cv2.inRange(hsv, red_lower2, red_upper2)
+
+        purple_lower = np.array([125, 50, 50])
+        purple_upper = np.array([160, 255, 255])
+        purple_mask = cv2.inRange(hsv, purple_lower, purple_upper)
+
+        yellow_ratio = np.sum(yellow_mask) / 255 / (roi.shape[0] * roi.shape[1])
+        red_purple_ratio = (np.sum(red_mask) + np.sum(purple_mask)) / 255 / (roi.shape[0] * roi.shape[1])
+
+        # Color-based identification (face or stop sign)
+        if yellow_ratio > 0.1:
+            matched_shape = "Face"
+        elif red_purple_ratio > 0.2:
+            matched_shape = "Stop Sign"
+        else:
+            # Perform template matching
+            matched_shape, score = match_template(cnt)
+
+        # Draw contour and label
+        cv2.drawContours(frame, [approx], -1, (0, 255, 0), 2)
+        cv2.putText(frame, f"{matched_shape}", (x, y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+        print(f"Detected shape: {matched_shape}")
+
+    return frame
+
+# Start camera and run detection
+with picamera.PiCamera() as camera:
+    camera.resolution = (320, 240)
+    camera.framerate = 24
+    time.sleep(2)
+
+    with picamera.array.PiRGBArray(camera, size=(320, 240)) as output:
+        print("Press Ctrl+C to stop")
+        try:
+            for frame in camera.capture_continuous(output, format="bgr", use_video_port=True):
+                image = frame.array
+                processed = detect_shapes(image)
+
+                cv2.imshow("Improved Detection", processed)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                output.truncate(0)
+        except KeyboardInterrupt:
+            print("Stopped by user.")
+
+cv2.destroyAllWindows()
+
+
+For shape and symbols
