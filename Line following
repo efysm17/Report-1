@@ -1,0 +1,191 @@
+import cv2
+import numpy as np
+import RPi.GPIO as GPIO
+import time
+
+# === GPIO motor setup ===
+GPIO.setmode(GPIO.BOARD)
+GPIO.setwarnings(False)
+
+EN_A = 22
+IN1 = 16
+IN2 = 18
+IN3 = 11
+IN4 = 13
+EN_B = 15
+SERVO_PIN = 40  # Make sure this is your servo's pin
+
+motor_pins = [EN_A, IN1, IN2, IN3, IN4, EN_B, SERVO_PIN]
+for pin in motor_pins:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, GPIO.LOW)
+
+# Setup motor PWM
+pwmA = GPIO.PWM(EN_A, 1.5)
+pwmB = GPIO.PWM(EN_B, 1.5)
+pwmA.start(4)
+pwmB.start(4)
+
+# Setup servo
+servo = GPIO.PWM(SERVO_PIN, 50)  # 50Hz
+servo.start(7.5)  # Center position
+
+# === Movement functions ===
+def move_forward():
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+
+def move_backward():
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+
+def move_right():
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+
+def move_left():
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+
+def stop():
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.LOW)
+
+# === Scan for line by sweeping the servo ===
+def scan_for_line():
+    print("Scanning for line...")
+
+    # Move backward a bit before scanning
+    print("Reversing slightly before scanning...")
+    move_backward()
+    pwmA.ChangeDutyCycle(40)
+    pwmB.ChangeDutyCycle(40)
+    time.sleep(0.7)  # Adjust duration as needed
+    stop()
+    time.sleep(0.5)
+
+    # Now scan with the servo
+    sweep_angles = [7.5, 6.5, 5.5, 4.5, 6.5, 7.5, 8.5, 9.5, 10.5, 8.5, 7.5]
+    max_attempts = 5
+
+    for _ in range(max_attempts):
+        for angle in sweep_angles:
+            servo.ChangeDutyCycle(angle)
+            time.sleep(1.2)  # Slightly reduced for faster scanning
+
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            roi = frame[40:240, :]
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            _, mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if contours:
+                print("Line found during scan at angle:", angle)
+                servo.ChangeDutyCycle(7.5)
+                return True
+
+    print("Line not found after scanning.")
+    servo.ChangeDutyCycle(7.5)
+    return False
+
+# === Camera Setup ===
+cap = cv2.VideoCapture(0)
+cap.set(3, 320)
+cap.set(4, 240)
+
+lost_counter = 0
+max_lost = 3
+
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        roi = frame[40:240, :]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contours:
+            lost_counter = 0
+            largest = max(contours, key=cv2.contourArea)
+            M = cv2.moments(largest)
+
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                cv2.circle(roi, (cx, 30), 5, (255, 0, 0), -1)
+
+                error = cx - 160  # 160 = center of the 320px wide frame
+
+                if abs(error) < 20:
+                    print("Moving straight")
+                    pwmA.ChangeDutyCycle(60)
+                    pwmB.ChangeDutyCycle(60)
+                    move_forward()
+                elif 20 <= error < 80:
+                    print("Soft right")
+                    pwmA.ChangeDutyCycle(40)
+                    pwmB.ChangeDutyCycle(60)
+                    move_forward()
+                elif error >= 80:
+                    print("Sharp right")
+                    pwmA.ChangeDutyCycle(30)
+                    pwmB.ChangeDutyCycle(60)
+                    move_right()
+                elif -80 < error <= -20:
+                    print("Soft left")
+                    pwmA.ChangeDutyCycle(60)
+                    pwmB.ChangeDutyCycle(40)
+                    move_forward()
+                elif error <= -80:
+                    print("Sharp left")
+                    pwmA.ChangeDutyCycle(60)
+                    pwmB.ChangeDutyCycle(30)
+                    move_left()
+            else:
+                print("Contour found but no centroid")
+                stop()
+        else:
+            lost_counter += 1
+            if lost_counter >= max_lost:
+                print("Line lost. Begin scan...")
+                stop()
+                found = scan_for_line()
+                if not found:
+                    move_backward()
+                    time.sleep(1)
+                    stop()
+                lost_counter = 0  # Reset counter after scan
+
+        # Show camera feedback
+        cv2.imshow("Mask", mask)
+        cv2.imshow("Frame", roi)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+except KeyboardInterrupt:
+    print("Interrupted by user")
+
+finally:
+    stop()
+    pwmA.stop()
+    pwmB.stop()
+    servo.stop()
+    cap.release()
+    cv2.destroyAllWindows()
+    GPIO.cleanup()
